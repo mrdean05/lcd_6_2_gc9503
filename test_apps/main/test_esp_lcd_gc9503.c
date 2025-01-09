@@ -128,7 +128,6 @@ SemaphoreHandle_t sem_gui_ready;
 esp_lcd_panel_handle_t panel_handle = NULL;
 esp_lcd_panel_io_handle_t io_handle = NULL;
 esp_io_expander_handle_t expander_handle = NULL;
-bool notLcdDisplay = true;
 
 static void lv_example_get_started_1(void *pvParameters);
 
@@ -253,44 +252,6 @@ static void test_draw_color_bar(esp_lcd_panel_handle_t panel_handle, uint16_t h_
     free(color);
 }
 
-
-static void IRAM_ATTR gpio_handshake_isr_handler(void* arg)
-{
-    //Sometimes due to interference or ringing or something, we get two irqs after eachother. This is solved by
-    //looking at the time between interrupts and refusing any interrupt too close to another one.
-    static uint32_t lasthandshaketime_us;
-    uint32_t currtime_us = esp_timer_get_time();
-    uint32_t diff = currtime_us - lasthandshaketime_us;
-    if (diff < 1000) {
-        return; //ignore everything <1ms after an earlier irq
-    }
-    lasthandshaketime_us = currtime_us;
-
-    esp_lcd_panel_disp_on_off(panel_handle, false);
-
-    notLcdDisplay = false;
-
-    
-}
-
-static void setuplcd_disablegpio( void ){
-
-    gpio_config_t io_conf = {
-        .intr_type = GPIO_INTR_POSEDGE,
-        .mode =  GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        .pin_bit_mask = BIT64(GPIO_LCD),
-    };
-
-    gpio_config(&io_conf);
-    gpio_install_isr_service(0);
-    gpio_set_intr_type(GPIO_LCD, GPIO_INTR_POSEDGE);
-    gpio_isr_handler_add(GPIO_LCD, gpio_handshake_isr_handler, NULL);
-
-}
-
-
 static void example_ledc_init(void)
 {
     // Prepare and then apply the LEDC PWM timer configuration
@@ -334,19 +295,10 @@ static void lvgl_tick(void *arg)
     lv_tick_inc(LV_TICK_PERIOD_MS);
 }
 
-static void display_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
+static void display_flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t *px_map)
 {
-    esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data;
-
-     // Add the offsets manually
-    int col_offset1 = 0;  // As in your Arduino code
-    int row_offset1 = 0;   // No row offset in your case
-    int col_offset2 = 0;   // Additional column offset
-    
-    int offsetx1 = area->x1;
-    int offsetx2 = area->x2;
-    int offsety1 = area->y1;
-    int offsety2 = area->y2;
+    //esp_lcd_panel_handle_t *panel_handle_ptr = (esp_lcd_panel_handle_t *)lv_display_get_user_data(display);
+    //esp_lcd_panel_handle_t panel_handle = *panel_handle_ptr;
 
     //printf("The values for the offsets are, offsetx1: %d offsetx2: %d, offsety1: %d, offsetsety2: %d\n\n", offsetx1, offsetx2, offsety1, offsety2);
     #if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
@@ -354,18 +306,39 @@ static void display_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color
         xSemaphoreTake(sem_vsync_end, portMAX_DELAY);
     #endif
 
+    lv_display_rotation_t rotation = lv_display_get_rotation(display);
+    lv_area_t rotated_area;
+    lv_color_format_t cf = lv_display_get_color_format(display);
+    /*Calculate the position of the rotated area*/
+    rotated_area = *area;
+    lv_display_rotate_area(display, &rotated_area);
+    /*Calculate the source stride (bytes in a line) from the width of the area*/
+    uint32_t src_stride = lv_draw_buf_width_to_stride(lv_area_get_width(area), cf);
+    /*Calculate the stride of the destination (rotated) area too*/
+    uint32_t dest_stride = lv_draw_buf_width_to_stride(lv_area_get_width(&rotated_area), cf);
+    /*Have a buffer to store the rotated area and perform the rotation*/
+    //static uint8_t rotated_buf[500*1014];
+    uint8_t *rotated_buf = (uint8_t *)heap_caps_malloc(500 * 1024, MALLOC_CAP_SPIRAM);
+    int32_t src_w = lv_area_get_width(area);
+    int32_t src_h = lv_area_get_height(area);
+    lv_draw_sw_rotate(px_map, rotated_buf, src_w, src_h, src_stride, dest_stride, rotation, cf);
+    /*Use the rotated area and rotated buffer from now on*/
+    area = &rotated_area;
+    px_map = rotated_buf;
+
     //printf("The values for the offsets are, offsetx1: %d offsetx2: %d, offsety1: %d, offsetsety2: %d\n\n", offsetx1, offsetx2, offsety1, offsety2);
     // pass the draw buffer to the driver
-    esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
-    lv_disp_flush_ready(drv);
+    esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
+    lv_disp_flush_ready(display);
+    free(rotated_buf);
 }
 
 static void Display_lvglInit(void){
     /* Contains internal graphic buffer called draw buffer */
-    static lv_disp_draw_buf_t disp_buf;
+    // static lv_draw_buf_t disp_buf;
 
     /* Contains the callback functions */
-    static lv_disp_drv_t disp_drv;
+    // static lv_fs_drv_t disp_drv;
 
     /* Initalize the lv_init library */
     lv_init();
@@ -373,27 +346,24 @@ static void Display_lvglInit(void){
     void *buf1 = NULL;
     void *buf2 = NULL;
 
-    buf1 = heap_caps_malloc(TEST_LCD_H_RES * 100 * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    lv_display_t *lv_display = lv_display_create(TEST_LCD_H_RES, TEST_LCD_V_RES);
+    lv_display_set_rotation(lv_display, LV_DISPLAY_ROTATION_270);
+
+     uint32_t buf_size = TEST_LCD_H_RES * TEST_LCD_V_RES * 2 / 10;
+
+    buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
     assert(buf1);
-    buf2 = heap_caps_malloc(TEST_LCD_H_RES * 100 * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    buf2 = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
     assert(buf2);
 
-    /* Initialize LVGL draw buffers */
-    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, TEST_LCD_H_RES * TEST_LCD_V_RES);
 
-    /* Register display driver to LVGL */
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.sw_rotate    = 1;
-    disp_drv.rotated    = LV_DISP_ROT_270;
-    disp_drv.hor_res    = TEST_LCD_H_RES;
-    disp_drv.ver_res    = TEST_LCD_V_RES; 
-    disp_drv.flush_cb   = display_flush_cb;
-    disp_drv.draw_buf   = &disp_buf;
-    disp_drv.user_data  = panel_handle;
-    disp_drv.full_refresh = 0;
-    disp_drv.direct_mode = 0;
+    lv_display_set_buffers(lv_display, buf1, buf2, buf_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_resolution(lv_display, TEST_LCD_H_RES, TEST_LCD_V_RES);
+    lv_display_set_user_data(lv_display, panel_handle);
+    lv_display_set_flush_cb(lv_display, display_flush_cb);
+    lv_display_set_color_format(lv_display, LV_COLOR_FORMAT_RGB565);
 
-    lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+
 
     /* Install LVGL tick timer */
     const esp_timer_create_args_t lvgl_tick_timer_args = {
@@ -642,35 +612,28 @@ void app_main(void)
 
     Display_lvglInit();
 
-    setuplcd_disablegpio();
-
-
     //draw_all_blue()
 
-    xTaskCreate(lv_example_get_started_1, "alternate_display_task", 4096, NULL, 5, NULL);
+    //xTaskCreate(lv_example_get_started_1, "alternate_display_task", 4096, NULL, 5, NULL);
 
-    /*
-    // Set the background color of the active screen
-    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x5042DD), LV_PART_MAIN);
+    lv_obj_t * win = lv_win_create(lv_screen_active());
+    lv_win_add_title(win, "MENU");
 
-    // Create a label and set its text
-    lv_obj_t *label = lv_label_create(lv_scr_act());
-    lv_label_set_text(label, "Hello world");
-
-    // Set the text color for the label
-    lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), LV_PART_MAIN);
-
-    // Align the label to the center of the screen
+    lv_obj_t * cont = lv_win_get_content(win);  /*Content can be added here*/
+    lv_obj_t * label = lv_label_create(cont);
+    lv_label_set_text(label, "This is\n"
+                      "a pretty\n"
+                      "long text\n"
+                      "to see how\n"
+                      "the window\n"
+                      "becomes");
     lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
-
-    // Make sure the screen refreshes after creating the label
-    //lv_scr_load(lv_scr_act());
-    */
+    
 
     while (1) {
 
-        vTaskDelay(pdMS_TO_TICKS(5));
-        if (notLcdDisplay) lv_task_handler();
+        vTaskDelay(pdMS_TO_TICKS(10));
+        lv_timer_handler();
 
     }
 
@@ -695,7 +658,6 @@ static void lv_example_get_started_1(void *pvParameters)
         // Clear the screen
         lv_obj_clean(lv_scr_act());
         
-        printf ("The value is %d\n", gpio_get_level(GPIO_LCD));
 
         // Display the second message
         lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x003a57), LV_PART_MAIN);
@@ -708,7 +670,6 @@ static void lv_example_get_started_1(void *pvParameters)
         // Wait for 200 milliseconds again
         vTaskDelay(pdMS_TO_TICKS(4000));
 
-        printf ("The value annex is %d\n", gpio_get_level(GPIO_LCD));
 
         // Clear the screen before looping
         lv_obj_clean(lv_scr_act());
