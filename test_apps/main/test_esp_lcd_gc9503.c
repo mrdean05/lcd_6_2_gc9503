@@ -18,23 +18,14 @@
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_io_additions.h"
 #include "esp_io_expander_tca9554.h"
-#include "lvgl.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_event.h"
-#include "demos/lv_demos.h"
-#include "lv_conf.h"
+
 #include "esp_timer.h"
 #include "driver/ledc.h"
 #include "esp_lcd_gc9503.h"
 
-#define LEDC_TIMER              LEDC_TIMER_0
-#define LEDC_MODE               LEDC_LOW_SPEED_MODE
-#define LEDC_OUTPUT_IO          6      // Define the output GPIO
-#define LEDC_CHANNEL            LEDC_CHANNEL_0
-#define LEDC_DUTY_RES           LEDC_TIMER_13_BIT // Set duty resolution to 13 bits
-#define LEDC_DUTY               (50)    // Set duty to 50%. (2 ** 13) * 50% = 4096
-#define LEDC_FREQUENCY          (4000) // Frequency in Hertz. Set frequency at 4 kHz
 
 #define LV_TICK_PERIOD_MS                       2
 #define TEST_LCD_H_RES              (480)
@@ -42,40 +33,6 @@
 #define TEST_LCD_BIT_PER_PIXEL      (18)
 #define TEST_RGB_BIT_PER_PIXEL      (16)
 #define TEST_LCD_DATA_WIDTH         (16)
-
-/*
-#define TEST_LCD_IO_RGB_DISP    GPIO_NUM_NC                          // -1
-#define TEST_LCD_IO_RGB_VSYNC (GPIO_NUM_39)             // EXAMPLE_PIN_NUM_VSYNC
-#define TEST_LCD_IO_RGB_HSYNC (GPIO_NUM_38)             // EXAMPLE_PIN_NUM_HSYNC
-#define TEST_LCD_IO_RGB_DE (GPIO_NUM_40)                // EXAMPLE_PIN_NUM_DE
-#define TEST_LCD_IO_RGB_PCLK (GPIO_NUM_41)              // EXAMPLE_PIN_NUM_PCLK
-
-// Data pins
-#define TEST_LCD_IO_RGB_DATA0 (GPIO_NUM_5)              // EXAMPLE_PIN_NUM_DATA0
-#define TEST_LCD_IO_RGB_DATA1 (GPIO_NUM_45)             // EXAMPLE_PIN_NUM_DATA1
-#define TEST_LCD_IO_RGB_DATA2 (GPIO_NUM_48)             // EXAMPLE_PIN_NUM_DATA2
-#define TEST_LCD_IO_RGB_DATA3 (GPIO_NUM_47)             // EXAMPLE_PIN_NUM_DATA3
-#define TEST_LCD_IO_RGB_DATA4 (GPIO_NUM_21)             // EXAMPLE_PIN_NUM_DATA4
-#define TEST_LCD_IO_RGB_DATA5 (GPIO_NUM_14)             // EXAMPLE_PIN_NUM_DATA5
-#define TEST_LCD_IO_RGB_DATA6 (GPIO_NUM_13)             // EXAMPLE_PIN_NUM_DATA6
-#define TEST_LCD_IO_RGB_DATA7 (GPIO_NUM_12)             // EXAMPLE_PIN_NUM_DATA7
-#define TEST_LCD_IO_RGB_DATA8 (GPIO_NUM_11)             // EXAMPLE_PIN_NUM_DATA8
-#define TEST_LCD_IO_RGB_DATA9 (GPIO_NUM_10)             // EXAMPLE_PIN_NUM_DATA9
-#define TEST_LCD_IO_RGB_DATA10 (GPIO_NUM_9)             // EXAMPLE_PIN_NUM_DATA10
-#define TEST_LCD_IO_RGB_DATA11 (GPIO_NUM_46)            // EXAMPLE_PIN_NUM_DATA11
-#define TEST_LCD_IO_RGB_DATA12 (GPIO_NUM_3)             // EXAMPLE_PIN_NUM_DATA12
-#define TEST_LCD_IO_RGB_DATA13 (GPIO_NUM_8)             // EXAMPLE_PIN_NUM_DATA13
-#define TEST_LCD_IO_RGB_DATA14 (GPIO_NUM_18)            // EXAMPLE_PIN_NUM_DATA14
-#define TEST_LCD_IO_RGB_DATA15 (GPIO_NUM_17)            // EXAMPLE_PIN_NUM_DATA15
-#define TEST_LCD_IO_SPI_CS_GPIO                 (GPIO_NUM_42)
-#define TEST_LCD_IO_SPI_CS_EXPANDER             (IO_EXPANDER_PIN_NUM_1)
-#define TEST_LCD_IO_SPI_SCK_WITHOUT_MULTIPLEX   (GPIO_NUM_2)
-#define TEST_LCD_IO_SPI_SCK_WITH_MULTIPLEX      (TEST_LCD_IO_RGB_DATA14)
-#define TEST_LCD_IO_SPI_SDA_WITHOUT_MULTIPLEX   (GPIO_NUM_1)
-#define TEST_LCD_IO_SPI_SDA_WITH_MULTIPLEX      (TEST_LCD_IO_RGB_DATA15)
-#define TEST_LCD_IO_RST                         (GPIO_NUM_NC)
-*/
-
 
 #define TEST_LCD_IO_RGB_DISP                    (GPIO_NUM_NC)
 #define TEST_LCD_IO_RGB_VSYNC                   (GPIO_NUM_42)
@@ -112,11 +69,8 @@
 #define TEST_EXPANDER_IO_I2C_SCL    (GPIO_NUM_18)
 #define TEST_EXPANDER_IO_I2C_SDA    (GPIO_NUM_8)
 
-#define TEST_DELAY_TIME_MS          (3000)
-
 static char *TAG = "gc9503_test";
 
-#define GPIO_LCD 17
 #define CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM 0
 
 #if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
@@ -128,8 +82,6 @@ SemaphoreHandle_t sem_gui_ready;
 esp_lcd_panel_handle_t panel_handle = NULL;
 esp_lcd_panel_io_handle_t io_handle = NULL;
 esp_io_expander_handle_t expander_handle = NULL;
-
-static void lv_example_get_started_1(void *pvParameters);
 
 static void test_draw_bitmap(esp_lcd_panel_handle_t panel_handle)
 {
@@ -149,133 +101,6 @@ static void test_draw_bitmap(esp_lcd_panel_handle_t panel_handle)
     free(color);
 }
 
-static void draw_all_blue(esp_lcd_panel_handle_t panel_handle) {
-    // Define the number of rows to draw at once (adjust based on available memory)
-    uint16_t row_line = 16; // Example: Process 16 rows at a time
-    uint8_t byte_per_pixel = TEST_RGB_BIT_PER_PIXEL / 8;
-
-    // Allocate memory for one chunk of rows
-    uint8_t *color = (uint8_t *)heap_caps_calloc(1, row_line * TEST_LCD_H_RES * byte_per_pixel, MALLOC_CAP_DMA);
-    if (!color) {
-        printf("Failed to allocate memory for color buffer\n");
-        return;
-    }
-
-    // Fill the buffer with blue color
-    for (int i = 0; i < row_line * TEST_LCD_H_RES; i++) {
-        if (byte_per_pixel == 2) {  // RGB565
-            color[i * 2] = 0x1F;     // Blue component 0001 1111
-            color[i * 2 + 1] = 0x00; // Upper byte 0000 0000
-        }
-    }
-
-    // Draw blue lines to fill the screen
-    for (int j = 0; j < TEST_LCD_V_RES; j += row_line) {
-        esp_lcd_panel_draw_bitmap(
-            panel_handle,
-            0,
-            j,
-            TEST_LCD_H_RES,
-            j + row_line > TEST_LCD_V_RES ? TEST_LCD_V_RES : j + row_line, // Avoid overshooting
-            color
-        );
-    }
-
-    free(color);
-}
-
-
-static void draw_all_yellow(esp_lcd_panel_handle_t panel_handle) {
-    // Define the number of rows to draw at once (adjust based on available memory)
-    uint16_t row_line = 16; // Example: Process 16 rows at a time
-    uint8_t byte_per_pixel = TEST_RGB_BIT_PER_PIXEL / 8;
-
-    // Allocate memory for one chunk of rows
-    uint8_t *color = (uint8_t *)heap_caps_calloc(1, row_line * TEST_LCD_H_RES * byte_per_pixel, MALLOC_CAP_DMA);
-    if (!color) {
-        printf("Failed to allocate memory for color buffer\n");
-        return;
-    }
-
-    // Fill the buffer with yellow color (RGB565: 0xFFE0)
-    for (int i = 0; i < row_line * TEST_LCD_H_RES; i++) {
-        if (byte_per_pixel == 2) {  // RGB565
-            color[i * 2] = 0xE0;     // Lower byte (1110 0000)
-            color[i * 2 + 1] = 0xFF; // Upper byte (1111 1111)
-        }
-    }
-
-    // Draw yellow lines to fill the screen
-    for (int j = 0; j < TEST_LCD_V_RES; j += row_line) {
-        esp_lcd_panel_draw_bitmap(
-            panel_handle,
-            0,
-            j,
-            TEST_LCD_H_RES,
-            j + row_line > TEST_LCD_V_RES ? TEST_LCD_V_RES : j + row_line, // Avoid overshooting
-            color
-        );
-    }
-
-    free(color);
-}
-
-
-
-
-static void test_draw_color_bar(esp_lcd_panel_handle_t panel_handle, uint16_t h_res, uint16_t v_res)
-{
-    uint8_t byte_per_pixel = (TEST_RGB_BIT_PER_PIXEL + 7) / 8;
-    uint16_t row_line = v_res / byte_per_pixel / 8;
-    uint8_t *color = (uint8_t *)heap_caps_calloc(1, row_line * h_res * byte_per_pixel, MALLOC_CAP_SPIRAM);
-
-    for (int j = 0; j < byte_per_pixel * 8; j++) {
-        for (int i = 0; i < row_line * h_res; i++) {
-            for (int k = 0; k < byte_per_pixel; k++) {
-                color[i * byte_per_pixel + k] = (BIT(j) >> (k * 8)) & 0xff;
-            }
-        }
-        esp_lcd_panel_draw_bitmap(panel_handle, 0, j * row_line, h_res, (j + 1) * row_line, color);
-    }
-
-    uint16_t color_line = row_line * byte_per_pixel * 8;
-    uint16_t res_line = v_res - color_line;
-    if (res_line) {
-        for (int i = 0; i < res_line * h_res; i++) {
-            for (int k = 0; k < byte_per_pixel; k++) {
-                color[i * byte_per_pixel + k] = 0xff;
-            }
-        }
-        esp_lcd_panel_draw_bitmap(panel_handle, 0, color_line, h_res, v_res, color);
-    }
-
-    free(color);
-}
-
-static void example_ledc_init(void)
-{
-    // Prepare and then apply the LEDC PWM timer configuration
-    ledc_timer_config_t ledc_timer = {
-        .speed_mode       = LEDC_MODE,
-        .timer_num        = LEDC_TIMER,
-        .duty_resolution  = LEDC_DUTY_RES,
-        .freq_hz          = LEDC_FREQUENCY,  // Set output frequency at 4 kHz
-        .clk_cfg          = LEDC_AUTO_CLK
-    };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
-
-    // Prepare and then apply the LEDC PWM channel configuration
-    ledc_channel_config_t ledc_channel = {
-        .speed_mode     = LEDC_MODE,
-        .channel        = LEDC_CHANNEL,
-        .timer_sel      = LEDC_TIMER,
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = LEDC_OUTPUT_IO,
-        .duty           = 0, // Set duty to 0%
-        .hpoint         = 0
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
-}
 
 static bool example_on_vsync_event(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_data)
 {
@@ -287,195 +112,6 @@ static bool example_on_vsync_event(esp_lcd_panel_handle_t panel, const esp_lcd_r
 #endif
     return high_task_awoken == pdTRUE;
 }
-
-
-static void lvgl_tick(void *arg)
-{
-    /* Tell LVGL how many milliseconds has elapsed */
-    lv_tick_inc(LV_TICK_PERIOD_MS);
-}
-
-static void display_flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t *px_map)
-{
-    //esp_lcd_panel_handle_t *panel_handle_ptr = (esp_lcd_panel_handle_t *)lv_display_get_user_data(display);
-    //esp_lcd_panel_handle_t panel_handle = *panel_handle_ptr;
-
-    //printf("The values for the offsets are, offsetx1: %d offsetx2: %d, offsety1: %d, offsetsety2: %d\n\n", offsetx1, offsetx2, offsety1, offsety2);
-    #if CONFIG_EXAMPLE_AVOID_TEAR_EFFECT_WITH_SEM
-        xSemaphoreGive(sem_gui_ready);
-        xSemaphoreTake(sem_vsync_end, portMAX_DELAY);
-    #endif
-
-    lv_display_rotation_t rotation = lv_display_get_rotation(display);
-    lv_area_t rotated_area;
-    lv_color_format_t cf = lv_display_get_color_format(display);
-    /*Calculate the position of the rotated area*/
-    rotated_area = *area;
-    lv_display_rotate_area(display, &rotated_area);
-    /*Calculate the source stride (bytes in a line) from the width of the area*/
-    uint32_t src_stride = lv_draw_buf_width_to_stride(lv_area_get_width(area), cf);
-    /*Calculate the stride of the destination (rotated) area too*/
-    uint32_t dest_stride = lv_draw_buf_width_to_stride(lv_area_get_width(&rotated_area), cf);
-    /*Have a buffer to store the rotated area and perform the rotation*/
-    //static uint8_t rotated_buf[500*1014];
-    uint8_t *rotated_buf = (uint8_t *)heap_caps_malloc(500 * 1024, MALLOC_CAP_SPIRAM);
-    int32_t src_w = lv_area_get_width(area);
-    int32_t src_h = lv_area_get_height(area);
-    lv_draw_sw_rotate(px_map, rotated_buf, src_w, src_h, src_stride, dest_stride, rotation, cf);
-    /*Use the rotated area and rotated buffer from now on*/
-    area = &rotated_area;
-    px_map = rotated_buf;
-
-    //printf("The values for the offsets are, offsetx1: %d offsetx2: %d, offsety1: %d, offsetsety2: %d\n\n", offsetx1, offsetx2, offsety1, offsety2);
-    // pass the draw buffer to the driver
-    esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
-    lv_disp_flush_ready(display);
-    free(rotated_buf);
-}
-
-static void Display_lvglInit(void){
-    /* Contains internal graphic buffer called draw buffer */
-    // static lv_draw_buf_t disp_buf;
-
-    /* Contains the callback functions */
-    // static lv_fs_drv_t disp_drv;
-
-    /* Initalize the lv_init library */
-    lv_init();
-
-    void *buf1 = NULL;
-    void *buf2 = NULL;
-
-    lv_display_t *lv_display = lv_display_create(TEST_LCD_H_RES, TEST_LCD_V_RES);
-    lv_display_set_rotation(lv_display, LV_DISPLAY_ROTATION_270);
-
-     uint32_t buf_size = TEST_LCD_H_RES * TEST_LCD_V_RES * 2 / 10;
-
-    buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
-    assert(buf1);
-    buf2 = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
-    assert(buf2);
-
-
-    lv_display_set_buffers(lv_display, buf1, buf2, buf_size, LV_DISPLAY_RENDER_MODE_PARTIAL);
-    lv_display_set_resolution(lv_display, TEST_LCD_H_RES, TEST_LCD_V_RES);
-    lv_display_set_user_data(lv_display, panel_handle);
-    lv_display_set_flush_cb(lv_display, display_flush_cb);
-    lv_display_set_color_format(lv_display, LV_COLOR_FORMAT_RGB565);
-
-
-
-    /* Install LVGL tick timer */
-    const esp_timer_create_args_t lvgl_tick_timer_args = {
-        .callback = &lvgl_tick,
-        .name = "lvgl_tick"
-    };
-
-    esp_timer_handle_t lvgl_tick_timer = NULL;
-    ESP_ERROR_CHECK(esp_timer_create(&lvgl_tick_timer_args, &lvgl_tick_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(lvgl_tick_timer, LV_TICK_PERIOD_MS * 1000));
-}
-
-
-//TEST_CASE("test gc9503 to draw color bar with RGB interface, using GPIO", "[gc9503][rgb][gpio]")
-/*
-void test_screen ( void ){
-    
-    
-    // Set the LEDC peripheral configuration
-    example_ledc_init();
-    // Set duty to 50%
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, LEDC_DUTY));
-    // Update duty to apply the new value
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL));
-    
-    
-    ESP_LOGI(TAG, "Install 3-wire SPI panel IO");
-    spi_line_config_t line_config = {
-        .cs_io_type = IO_TYPE_GPIO,
-        .cs_gpio_num = TEST_LCD_IO_SPI_CS_GPIO,
-        .scl_io_type = IO_TYPE_GPIO,
-        .scl_gpio_num = TEST_LCD_IO_SPI_SCK_WITHOUT_MULTIPLEX,
-        .sda_io_type = IO_TYPE_GPIO,
-        .sda_gpio_num = TEST_LCD_IO_SPI_SDA_WITHOUT_MULTIPLEX,
-        .io_expander = NULL,
-    };
-    esp_lcd_panel_io_3wire_spi_config_t io_config = GC9503_PANEL_IO_3WIRE_SPI_CONFIG(line_config, 0);
-    esp_lcd_new_panel_io_3wire_spi(&io_config, &io_handle);
-
-    ESP_LOGI(TAG, "Install GC9503 panel driver");
-    esp_lcd_rgb_panel_config_t rgb_config = {
-        .clk_src = LCD_CLK_SRC_DEFAULT,
-        .psram_trans_align = 64,
-        .data_width = TEST_LCD_DATA_WIDTH,
-        .bits_per_pixel = TEST_RGB_BIT_PER_PIXEL,
-        .de_gpio_num = TEST_LCD_IO_RGB_DE,
-        .pclk_gpio_num = TEST_LCD_IO_RGB_PCLK,
-        .vsync_gpio_num = TEST_LCD_IO_RGB_VSYNC,
-        .hsync_gpio_num = TEST_LCD_IO_RGB_HSYNC,
-        .disp_gpio_num = TEST_LCD_IO_RGB_DISP,
-        .data_gpio_nums = {
-            TEST_LCD_IO_RGB_DATA0,
-            TEST_LCD_IO_RGB_DATA1,
-            TEST_LCD_IO_RGB_DATA2,
-            TEST_LCD_IO_RGB_DATA3,
-            TEST_LCD_IO_RGB_DATA4,
-            TEST_LCD_IO_RGB_DATA5,
-            TEST_LCD_IO_RGB_DATA6,
-            TEST_LCD_IO_RGB_DATA7,
-            TEST_LCD_IO_RGB_DATA8,
-            TEST_LCD_IO_RGB_DATA9,
-            TEST_LCD_IO_RGB_DATA10,
-            TEST_LCD_IO_RGB_DATA11,
-            TEST_LCD_IO_RGB_DATA12,
-            TEST_LCD_IO_RGB_DATA13,
-            TEST_LCD_IO_RGB_DATA14,
-            TEST_LCD_IO_RGB_DATA15,
-        },
-        .timings = GC9503_480_960_PANEL_60HZ_RGB_TIMING(),
-        .flags.fb_in_psram = 1,
-    };
-    gc9503_vendor_config_t vendor_config = {
-        .rgb_config = &rgb_config,
-        .flags = {
-            .auto_del_panel_io = 1,
-        },
-    };
-    const esp_lcd_panel_dev_config_t panel_config = {
-        .reset_gpio_num = TEST_LCD_IO_RST,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
-        .bits_per_pixel = TEST_LCD_BIT_PER_PIXEL,
-        .vendor_config = &vendor_config,
-    };
-    
-    esp_lcd_new_panel_gc9503(io_handle, &panel_config, &panel_handle);
-
-    ESP_LOGI(TAG, "Register event callbacks");
-    esp_lcd_rgb_panel_event_callbacks_t cbs = {
-        .on_vsync = example_on_vsync_event,
-    };
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, NULL));
-
-    esp_lcd_panel_reset(panel_handle);
-    esp_lcd_panel_init(panel_handle);
-    //esp_lcd_panel_disp_on_off(panel_handle, true);
-    //vTaskDelay(pdMS_TO_TICKS(1000));
-
-
-    
-    //test_draw_bitmap(panel_handle);
-    //draw_all_blue(panel_handle);
-    //test_draw_color_bar(panel_handle, TEST_LCD_H_RES, TEST_LCD_V_RES);
-    //vTaskDelay(pdMS_TO_TICKS(TEST_DELAY_TIME_MS));
-
-    // Mirror the panel by hardware
-    esp_lcd_panel_mirror(panel_handle, true, true);
-    //vTaskDelay(pdMS_TO_TICKS(10000));
-
-    //esp_lcd_panel_io_del(io_handle);
-    //esp_lcd_panel_del(panel_handle);
-}
-*/
 
 void test_screen_ioexpander ( void )
 {
@@ -567,23 +203,10 @@ void test_screen_ioexpander ( void )
     esp_lcd_panel_reset(panel_handle);
 
     esp_lcd_panel_init(panel_handle);
-    //esp_lcd_panel_disp_on_off(panel_handle, true);
-    //vTaskDelay(pdMS_TO_TICKS(1000));
-
-
-    //draw_all_yellow(panel_handle);
-    //test_draw_bitmap(panel_handle);
-    // draw_all_blue(panel_handle);
-    //test_draw_color_bar(panel_handle, TEST_LCD_H_RES, TEST_LCD_V_RES);
-    //vTaskDelay(pdMS_TO_TICKS(TEST_DELAY_TIME_MS));
 
     // Mirror the panel by hardware
     esp_lcd_panel_mirror(panel_handle, true, true);
-    //vTaskDelay(pdMS_TO_TICKS(10000));
-
-    //esp_lcd_panel_io_del(io_handle);
-    //esp_lcd_panel_del(panel_handle);
-    //i2c_driver_delete(TEST_EXPANDER_I2C_HOST);
+    
 }
 
 
@@ -605,76 +228,8 @@ void app_main(void)
     assert(sem_gui_ready);
     #endif
 
-
-
     test_screen_ioexpander();
-    //test_screen();
 
-    Display_lvglInit();
+    test_draw_bitmap(panel_handle);
 
-    //draw_all_blue()
-
-    //xTaskCreate(lv_example_get_started_1, "alternate_display_task", 4096, NULL, 5, NULL);
-
-    lv_obj_t * win = lv_win_create(lv_screen_active());
-    lv_win_add_title(win, "MENU");
-
-    lv_obj_t * cont = lv_win_get_content(win);  /*Content can be added here*/
-    lv_obj_t * label = lv_label_create(cont);
-    lv_label_set_text(label, "This is\n"
-                      "a pretty\n"
-                      "long text\n"
-                      "to see how\n"
-                      "the window\n"
-                      "becomes");
-    lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
-    
-
-    while (1) {
-
-        vTaskDelay(pdMS_TO_TICKS(10));
-        lv_timer_handler();
-
-    }
-
-
-}
-
-static void lv_example_get_started_1(void *pvParameters)
-{
-    while (1)
-    {
-        // Display the first message
-        lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0xffffff), LV_PART_MAIN);
-        
-        lv_obj_t *label = lv_label_create(lv_scr_act());
-        lv_label_set_text(label, "Hello world");
-        lv_obj_set_style_text_color(label, lv_color_hex(0x003a57), LV_PART_MAIN);
-        lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
-
-        // Wait for 200 milliseconds
-        vTaskDelay(pdMS_TO_TICKS(4000));
-        
-        // Clear the screen
-        lv_obj_clean(lv_scr_act());
-        
-
-        // Display the second message
-        lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x003a57), LV_PART_MAIN);
-
-        label = lv_label_create(lv_scr_act());
-        lv_label_set_text(label, "It has worked\n");
-        lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), LV_PART_MAIN);
-        lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
-
-        // Wait for 200 milliseconds again
-        vTaskDelay(pdMS_TO_TICKS(4000));
-
-
-        // Clear the screen before looping
-        lv_obj_clean(lv_scr_act());
-
-
-
-    }
 }
